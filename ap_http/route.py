@@ -63,7 +63,7 @@ class Router(object):
         self.func = func  # 关联的函数
 
     def __repr__(self):
-        return 'Router< {method} : {route} at {addr}>'.format(method=self.method, route=self.route, addr=id(self))
+        return '<Router{method} : {route}>'.format(method=self.method, route=self.route)
 
 
 class RouterCallBack(object):

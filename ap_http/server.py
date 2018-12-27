@@ -9,9 +9,18 @@ from jinja2 import FileSystemLoader, Environment
 from ap_http.route import RouteGroup
 from ap_logger import logger
 
+
 class BaseHttpServer(object):
+    """
+    BaseHttpServer : basic http server
+    """
 
     def __init__(self, name, host, port):
+        '''
+        :param name: server name
+        :param host: host
+        :param port: port
+        '''
         self._app = Application(logger=logger.make_logger('CORE'))  # maybe can specify logger?
         self._app.ap_kwargs = dict()  # args passed to route
         self._app.template = None
@@ -54,8 +63,8 @@ class BaseHttpServer(object):
         self._app.middlewares.extend(middlewares)
 
     def add_template_filter(self, name, callback):
-        if self._template:
-            self._template.filters[name] = callback
+        if self._app.template:
+            self._app.template.filters[name] = callback
 
     def add_shutdown_signal(self, signal_callback):
         self._app.on_shutdown.append(signal_callback)

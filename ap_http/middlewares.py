@@ -6,8 +6,8 @@ __doc__ = 'Appointed2 - defined some basic middlewares for ap_http server'
 
 
 from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPError
-from ap_http.usermgr import UserAuth
 from ap_logger.logger import make_logger
+from abc import abstractmethod
 import json
 import traceback
 
@@ -20,38 +20,22 @@ class Middleware(object):
     def __init__(self, *args, **kwargs):
         pass
 
+    @abstractmethod
     async def __call__(self, *args, **kwargs):
         pass
 
 
-def make_auth_middleware(cookie_name, auth_obj):
+def make_auth_middleware(auth_obj):
     """
     make a basic user auth middleware
-    :param auth_obj: UserAuth or its derived class
+    :param auth_obj: Middleware or its derived class
     :return:
     """
-    if not isinstance(auth_obj, UserAuth):
-        raise ValueError("'auth_obj' must be instance of UserAuth")
-
-
+    if not isinstance(auth_obj, Middleware):
+        raise ValueError("'auth_obj' must be instance of Middleware")
     @middleware
     async def authorization_middleware(request, handler):
-        """
-        middleware for auth user
-        :param request: request object
-        :param handler: handler passed by server
-        :return: handled result
-        """
-        request.__user__ = None
-        cookie_str = request.cookies.get(cookie_name)
-        user = ''
-        if cookie_str:
-            if 'deleted' not in cookie_str:
-                user = await auth_obj.decode(cookie_str)
-            if user:
-                request.__user__ = user
-                logger.debug('Set user from cookie \'%s\'' % cookie_str)
-        return (await handler(request))
+        return await auth_obj(request=request, handler=handler)
     return authorization_middleware
 
 

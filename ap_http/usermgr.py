@@ -1,16 +1,21 @@
 # coding=utf-8
 __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
-__all__ = ['UserAuth']
+__all__ = ['UserAuthMiddleware']
 __doc__ = 'Appointed2 - defined some basic methods for authorizing user'
 from time import time
-from ap_http.inner_tables import User
+
 import hashlib
+from ap_http.middlewares import Middleware
+from ap_logger.logger import make_logger
 
 
-class UserAuth:
+_logger = make_logger('MIDWARE')
 
-    def __int__(self, cookie_name, cookie_key, type_of_user, dbmgr):
+
+class UserAuthMiddleware(Middleware):
+
+    def __init__(self, cookie_name, cookie_key, type_of_user, dbmgr):
         """
         UserAuth ctor
         :param cookie_name: cookie name for auth user
@@ -23,6 +28,7 @@ class UserAuth:
         self.cookie_key = cookie_key
         self.type_of_user = type_of_user
         self.dbmgr = dbmgr
+        super(UserAuthMiddleware, self).__init__()
 
     async def decode(self, cookie_str):
         """
@@ -47,3 +53,14 @@ class UserAuth:
         user.passwd = '******'  # hide the password
         return user
 
+    async def __call__(self, request, handler):
+        request.__user__ = None
+        cookie_str = request.cookies.get(self.cookie_name)
+        user = ''
+        if cookie_str:
+            if 'deleted' not in cookie_str:
+                user = await self.decode(cookie_str)
+            if user:
+                request.__user__ = user
+                _logger.debug('Set user from cookie \'%s\'' % cookie_str)
+        return await handler(request)

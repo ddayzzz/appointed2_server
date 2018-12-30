@@ -5,12 +5,12 @@ __all__ = ['SampleApp']
 __doc__ = """Appointed2 - define a simple app with mysql connection. It can be run as a gunicron module or 
 standalone model"""
 from ap_http.app import BaseHttpApp
-from ap_samples.http_server import handlers
+from ap_samples.http_app import handlers
 from ap_database.dbmgr import MySQLManager
 from ap_http.middlewares import make_auth_middleware, make_data_middleware, make_response_middleware
 from ap_http.middlewares import ResponseMiddleware, UserAuthMiddleware
 from ap_http.signals import make_shutdown_sqlmanager_signal
-from ap_samples.http_server.model import User
+from ap_samples.http_app.model import User
 
 
 def _make_app(dbusername, dbpasswd, dbname, dbhost, dbport):
@@ -37,7 +37,18 @@ def _make_app(dbusername, dbpasswd, dbname, dbhost, dbport):
 
 
 async def SampleApp(dbusername, dbpasswd, dbname, dbhost, dbport):
-    return _make_app(dbusername, dbpasswd, dbname, dbhost, dbport)
+    """
+    make a closure for gunicorn to run
+    :param dbusername:
+    :param dbpasswd:
+    :param dbname:
+    :param dbhost:
+    :param dbport:
+    :return:
+    """
+    async def gunicron_need_callable():
+        return _make_app(dbusername, dbpasswd, dbname, dbhost, dbport)
+    return gunicron_need_callable
 
 
 if __name__ == '__main__':

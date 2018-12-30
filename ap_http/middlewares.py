@@ -182,7 +182,7 @@ class ResponseMiddleware(Middleware):
         """
         return self._handle_dict(request=request, response={
             'exception': '{0}'.format(type(exc)),
-            'args': '\n'.join(exc.args),
+            'args': '\n'.join([str(x) for x in exc.args]),
             'traceback': traceback.format_exc(),
             # 'stack_info': traceback.format_stack(),
             'status': 500

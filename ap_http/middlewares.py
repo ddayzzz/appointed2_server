@@ -5,7 +5,7 @@ __all__ = ['Middleware', 'ResponseMiddleware', 'make_auth_middleware', 'make_dat
 __doc__ = 'Appointed2 - defined some basic middlewares for ap_http server'
 
 
-from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPError
+from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPError, HTTPNotFound
 from ap_logger.logger import make_logger
 from abc import abstractmethod
 import json
@@ -207,9 +207,16 @@ class ResponseMiddleware(Middleware):
             # default:
             return self._handle_default(request=request, response=r)
             # 由于 websocket 可能返回特殊的响应，如果这种情况，系统会自动处理
+        except HTTPNotFound as e:
+            # hide error info which will be present in aiohttp.access
+            # _response_handler_logger.error(
+            #     'Not found : {0} {1}'.format(request.method, request.path_qs),
+            #     exc_info=False, stack_info=False)
+            return self._handle_server_exception(request=request.method, exc=e)
         except HTTPError as e:
-            _response_handler_logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
-                         exc_info=True, stack_info=False)
+            # hide error info which will be present in aiohttp.access
+            # _response_handler_logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
+            #              exc_info=True, stack_info=False)
             return self._handle_server_exception(request=request, exc=e)
         except Exception as e:
             _response_handler_logger.error("Faild to handle request, with router's inner exception : '{0}'".format(e), exc_info=True, stack_info=False)

@@ -6,15 +6,26 @@ __doc__ = 'Appointed2 - set logger'
 import logging
 import sys
 
+__logging_const_mapping = {
+    'info': logging.INFO,
+    'error': logging.ERROR,
+    'debug': logging.DEBUG,
+    'warning': logging.WARNING
+}
 
-def set_logger_format(level=logging.INFO, stream=sys.stdout):
+
+def set_logger_format(level='info', stream=sys.stderr):
     """
     config the logger format and output target
-    :param level: the minimum level for output log
+    :param level: the minimum level for output log. info, debug, error, warning
     :param stream: stream to output
     :return:
     """
-    logging.basicConfig(stream=stream, level=level, format='%(name)s: %(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s', datefmt='%a, %d %b %Y %H:%M:%S')
+
+    logging.basicConfig(stream=stream,
+                        level=__logging_const_mapping.get(level, logging.INFO),
+                        format='[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
+
 
 def make_logger(name):
     """

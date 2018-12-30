@@ -36,7 +36,7 @@ def _make_app(dbusername, dbpasswd, dbname, dbhost, dbport):
     return server
 
 
-async def SampleApp(dbusername, dbpasswd, dbname, dbhost, dbport):
+def SampleApp(dbusername, dbpasswd, dbname, dbhost, dbport):
     """
     make a closure for gunicorn to run
     :param dbusername:

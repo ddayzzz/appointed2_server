@@ -7,8 +7,7 @@ from ap_http.app import BaseHttpApp
 from ap_samples.http_server import handlers
 from ap_database.dbmgr import MySQLManager
 from ap_http.middlewares import make_auth_middleware, make_data_middleware, make_response_middleware
-from ap_http.middlewares import ResponseMiddleware
-from ap_http.usermgr import UserAuthMiddleware
+from ap_http.middlewares import ResponseMiddleware, UserAuthMiddleware
 from ap_http.signals import make_shutdown_sqlmanager_signal
 from ap_samples.http_server.model import User
 

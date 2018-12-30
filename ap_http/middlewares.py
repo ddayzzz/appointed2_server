@@ -9,10 +9,13 @@ from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPErr
 from ap_logger.logger import make_logger
 from abc import abstractmethod
 import json
+import hashlib
 import traceback
+from time import time
 
 
-logger = make_logger('MIDWARE')
+_midware_logger = make_logger('MIDWARE')
+_response_handler_logger = make_logger('RESPOSE')
 
 
 class Middleware(object):
@@ -48,10 +51,10 @@ def make_data_middleware():
             # 检查HTTP头的Content-Type
             if request.content_type.startswith('application/json'):
                 request.__data__ = await request.json()  # 格式化为JSON
-                logger.debug("Preprocess data from content type: '%s'" % request.content_type)
+                _midware_logger.debug("Preprocess data from content type: '%s'" % request.content_type)
             elif request.content_type.startswith('application/x-www-form-urlencoded'):
                 request.__data__ = await request.post()  # 这个是表格的
-                logger.debug("Preprocess data from content type: '%s'" % request.content_type)
+                _midware_logger.debug("Preprocess data from content type: '%s'" % request.content_type)
 
         return (await handler(request))
     return data_preprocessor_middleware
@@ -205,9 +208,66 @@ class ResponseMiddleware(Middleware):
             return self._handle_default(request=request, response=r)
             # 由于 websocket 可能返回特殊的响应，如果这种情况，系统会自动处理
         except HTTPError as e:
-            logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
+            _response_handler_logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
                          exc_info=True, stack_info=False)
             return self._handle_server_exception(request=request, exc=e)
         except Exception as e:
-            logger.error("Faild to handle request, with router's inner exception : '{0}'".format(e), exc_info=True, stack_info=False)
+            _response_handler_logger.error("Faild to handle request, with router's inner exception : '{0}'".format(e), exc_info=True, stack_info=False)
             return self._handle_route_exception(request=request, exc=e)
+
+
+class UserAuthMiddleware(Middleware):
+
+    def __init__(self, cookie_name, cookie_key, type_of_user, dbmgr):
+        """
+        UserAuth ctor
+        :param cookie_name: cookie name for auth user
+        :param cookie_key: cookie's key
+        :param type_of_user: user object which stored in ap_database, must be derived class of orm.Model and its primary key's name is id
+        :param dbmgr: ap_database manager, must be instance of DatabaseManager
+        :return:
+        """
+        self.cookie_name = cookie_name
+        self.cookie_key = cookie_key
+        self.type_of_user = type_of_user
+        self.dbmgr = dbmgr
+        super(UserAuthMiddleware, self).__init__()
+
+    async def decode(self, cookie_str):
+        """
+        decode cookie to user string(basic use)
+        :param cookie_str: cookie str to decode
+        :return:
+        """
+        if not cookie_str:
+            return None
+        L = cookie_str.split('-')
+        if len(L) != 3:
+            return None
+        uid, expires, sha1 = L
+        if int(expires) < time():
+            return None
+        user = await self.dbmgr.query(self.type_of_user, id=uid)
+        if user is None:
+            return None
+        s = '%s-%s-%s-%s' % (uid, user.passwd, expires, self.cookie_key)
+        if sha1 != hashlib.sha1(s.encode('utf-8')).hexdigest():
+            return None
+        user.passwd = '******'  # hide the password
+        return user
+
+    async def __call__(self, request, handler):
+        request.__user__ = None
+        cookie_str = request.cookies.get(self.cookie_name)
+        user = ''
+        if cookie_str:
+            if 'deleted' not in cookie_str:
+                try:
+                    user = await self.decode(cookie_str)
+                except Exception as e:
+                    _midware_logger.error('Decode cookie str {0} failed, with exception: {1}'.format(cookie_str, type(e)))
+                    user = ''
+            if user:
+                request.__user__ = user
+                _midware_logger.debug('Set user from cookie \'%s\'' % cookie_str)
+        return await handler(request)

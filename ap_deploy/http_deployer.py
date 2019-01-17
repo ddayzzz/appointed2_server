@@ -19,3 +19,4 @@ def run_on_standalone(app, host, port, *args, **kwargs):
     """
     from aiohttp.web import run_app
     run_app(app, host=host, port=port, *args, **kwargs)
+

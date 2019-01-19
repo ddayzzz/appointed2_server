@@ -7,12 +7,13 @@
 __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
 __all__ = ['create_pool', 'select', 'execute', 'create_args_string',
-           'Field', 'StringField', 'BooleanField', 'IntegerField', 'FloatField', 'TextField', 'SmallIntField',
+           'Field', 'StringField', 'BooleanField', 'IntegerField', 'FloatField', 'TextField', 'SmallIntField', 'DateTimeField',
            'ModelMetaclass', 'Model','TempModel', 'TempModelMetaclass',
            'destory_pool']
 __doc__ = 'Appointed2 - ORM define'
 
 import aiomysql
+from datetime import datetime
 from ap_logger.logger import make_logger
 
 
@@ -104,7 +105,6 @@ class Field(object):
     def __str__(self):
         server_debug('<%s, %s, %s%s>' % (self.__class__.__name__, self.column_type, self.prefix, self.name))
 
-
 # -*- 定义不同类型的衍生Field -*-
 # -*- 表的不同列的字段的类型不一样
 class StringField(Field):
@@ -155,6 +155,15 @@ class TextField(Field):
         return 'TextField'
 
 
+class DateTimeField(Field):
+
+    def __init__(self, prefix=None, name=None, primary_key=False, default=None):
+        super(DateTimeField, self).__init__(prefix, name, 'datetime', primary_key, default)
+
+    def __str__(self):
+        return 'DateTimeField'
+
+
 # -*-定义Model的元类
 
 # 所有的元类都继承自type
@@ -168,13 +177,16 @@ class TextField(Field):
 
 # 完成这些工作就可以在Model中定义各种数据库的操作方法
 class ModelMetaclass(type):
-    # __new__控制__init__的执行，所以在其执行之前
-    # cls:代表要__init__的类，此参数在实例化时由Python解释器自动提供(例如下文的User和Model)
-    # bases：代表继承父类的集合
-    # attrs：类的方法集合
-    def __new__(cls, name, bases, attrs):
-        # 排除Model
 
+    def __new__(cls, name, bases, attrs):
+        """
+        __new__控制__init__的执行，所以在其执行之前
+        :param cls: 代表要__init__的类，此参数在实例化时由Python解释器自动提供(例如下文的User和Model)
+        :param name:
+        :param bases: 代表继承父类的集合
+        :param attrs: 类的方法集合
+        :return:
+        """
         if name == 'Model':
             return type.__new__(cls, name, bases, attrs)
         # 获取table名词
@@ -220,6 +232,7 @@ class ModelMetaclass(type):
 
 
 class TempModelMetaclass(type):
+
     def __new__(cls, name, bases, attrs):
         # 排除 TempModel
         if name == 'TempModel':
@@ -264,6 +277,55 @@ class TempModelMetaclass(type):
                                                             t=attrs['__tables__'])
         attrs['__primaryKey__'] = primaryKey
         return type.__new__(cls, name, bases, attrs)
+
+
+class ViewTableMetaclass(type):
+
+    """
+    定义视图, 不允许定义主键和默认值, 同时不允许进行更新操作. 只有查询功能
+    """
+
+    def __new__(cls, name, bases, attrs):
+        """
+        __new__控制__init__的执行，所以在其执行之前
+        :param cls: 代表要__init__的类，此参数在实例化时由Python解释器自动提供(例如下文的User和Model)
+        :param name:
+        :param bases: 代表继承父类的集合
+        :param attrs: 类的方法集合
+        :return:
+        """
+        if name == 'ViewTable':
+            return type.__new__(cls, name, bases, attrs)
+        # 获取table名词
+        tableName = attrs.get('__table__', None) or name
+        server_debug('Find view %s (View: %s)' % (name, tableName))
+        # 获取Field和主键的名称
+        mappings = dict()
+        fields = []
+        primaryKeys = []  # 这个是主键
+        for k, v in attrs.items():
+            if isinstance(v, Field):
+                server_info('Find field : %s ---> %s' % (k, v))
+                mappings[k] = v
+                # 是否是主键
+                if v.primary_key:
+                    raise ValueError('Primary key is not allowed in view')
+                else:
+                    fields.append(k)  # 所有非主键
+
+        for k in mappings.keys():  # 把所有属性相同的属性去掉
+            attrs.pop(k)
+        string_fields = list(map(lambda f: '`%s`' % f, fields))
+
+        attrs['__mappings__'] = mappings  # 保存原始 Field 信息
+        attrs['__table__'] = tableName
+
+        attrs['__fields__'] = fields
+
+        attrs['__select__'] = 'select %s from `%s`' % (', '.join(string_fields) if len(string_fields) > 0 else '*', tableName)
+
+        return type.__new__(cls, name, bases, attrs)
+
 
 # 定义ORM所有映射的基类：Model
 # Model类的任意子类可以映射一个数据库表
@@ -455,6 +517,63 @@ class TempModel(dict, metaclass=TempModelMetaclass):
             return rs
         else:
             return [cls(**r) for r in rs]
+
+
+class ViewTable(dict, metaclass=ViewTableMetaclass):
+
+    def __init__(self, **kw):
+        super(ViewTable, self).__init__(**kw)
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(r'"ViewTable" objct has not attribute: %s' % (key))
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def getValue(self, key):
+        return getattr(self, key, None)
+
+    @classmethod
+    async def do(cls, pool, where, args, **kw):
+        """
+        在视图中处理查询操作, 其实可以复用 临时表的查询
+        :param pool: 连接池
+        :param where: where 子句
+        :param args: where 查询的参数
+        :param kw: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量;
+        :return:
+        """
+        sql = [cls.__select__]
+
+        if where:
+            sql.append('where')
+            sql.append(where)
+
+        if args is None:
+            args = []
+
+        orderBy = kw.get('orderBy', None)
+        if orderBy:
+            sql.append('order by')
+            sql.append(orderBy)
+
+        limit = kw.get('limit', None)
+        if limit is not None:
+            sql.append('limit')
+            if isinstance(limit, int):
+                sql.append('?')
+                args.append(limit)
+            elif isinstance(limit, tuple) and len(limit) == 2:
+                sql.append('?,?')
+                args.extend(limit)
+            else:
+                raise ValueError('Invalid limit value: %s' % str(limit))
+        rs = await select(pool, ' '.join(sql), args)
+
+        return [cls(**r) for r in rs]
 
 
 async def destory_pool(pool):

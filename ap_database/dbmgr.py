@@ -3,7 +3,7 @@ __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
 __all__ = ["MySQLManager", "SQLManager"]
 __doc__ = 'Appointed2 - SQL manager'
-from ap_database.orm import ModelMetaclass, Model, TempModelMetaclass, TempModel
+from ap_database.orm import ModelMetaclass, Model, TempModelMetaclass, TempModel, ViewTableMetaclass, ViewTable
 from ap_database.orm import create_pool as _createpool
 from ap_database.orm import destory_pool as _despool
 from asyncio import get_event_loop
@@ -105,18 +105,18 @@ class MySQLManager(SQLManager):
                 raise ValueError('无法创建指定的对象‘%s’，通过属性：%s' % (str(model_type_or_object), ','.join(['%s=%s' % (k, v) for k, v in fields_include_primary_keys.items()])))
             await obj.save(self.pool)
         else:
-            raise ValueError(str(model_type_or_object) + "不是有效的的ORM模型")
+            raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
 
     async def query(self, model_type, **obj_primaryKeys):
         """
-        查询一个表中的条目，返回ORM ： model_type的类
+        查询一个表中的条目，返回ORM ： model_type的类。 由于视图目前不支持修改以及没有主码， 所以这个函数不适合 视图
         :param model_type: 模型，必须是Model的子类
         :param obj_primaryKeys: 主键（可以有多个）
         :return: 返回对象或者抛出错误
         """
         await self.ensureConnected()
         if not isinstance(model_type, ModelMetaclass):
-            raise ValueError(str(model_type) + "不是有效的的ORM模型")
+            raise ValueError(str(model_type) + '不是 "Model"的一个子类。')
         obj = await model_type.find(self.pool, **obj_primaryKeys)
         return obj
 
@@ -138,12 +138,13 @@ class MySQLManager(SQLManager):
                 raise ValueError('没有找到条目：%s' % ','.join(['%s=%s' % (k, v) for k, v in obj_primaryKeys.items()]))
             await obj.remove(self.pool)
         else:
-            raise ValueError(str(model_type_or_object) + "不是有效的的ORM模型")
+            raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
 
-    async def update(self, model_type_or_object, **kwargs):
+    async def update(self, model_type_or_object, ignore_not_exists=False, **kwargs):
         """
         更新对象或者数据库中的条目
         :param model_type_or_object: Model的子类实例或者是Metalass 的子类
+        :param ignore_not_exists: 为 True 在不存在的这个对象的时候创建一个新的对象；否则抛出异常
         :param kwargs: 更新的主键以及其他的属性
         :return:
         """
@@ -156,16 +157,21 @@ class MySQLManager(SQLManager):
             # 是Model的元类
             obj = await self.query(model_type_or_object, **kwargs)
             if not obj:
-                raise ValueError('没有找到条目：%s' % ','.join(['%s=%s' % (k, v) for k, v in kwargs.items()]))
+                if not ignore_not_exists:
+                    raise ValueError('没有找到条目：%s' % ','.join(['%s=%s' % (k, v) for k, v in kwargs.items()]))
+                else:
+                    # 根据现有的属性创建一个对象
+                    await self.insert(model_type_or_object, **kwargs)
+                    return
         else:
-            raise ValueError(str(model_type_or_object) + "不是有效的的ORM模型")
+            raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
         for k, v in kwargs.items():
             obj.__setattr__(k, v)
         await obj.update(self.pool)
 
     async def queryAll(self, model_type, sql_where=None, args=None, **kwargs):
         """
-        自定义查询
+        自定义查询(对于视图和基本表)
         :param model_type: ORM元类的子类
         :param sql_where: SQL语句，使用?占位
         :param args: 占位符的实际值
@@ -173,14 +179,15 @@ class MySQLManager(SQLManager):
         :return:
         """
         await self.ensureConnected()
-        if not isinstance(model_type, ModelMetaclass):
-            raise ValueError(str(model_type) + "不是有效的的ORM模型")
-        result = await model_type.findAll(self.pool, sql_where, args, **kwargs)
+        if isinstance(model_type, ModelMetaclass):
+            result = await model_type.findAll(self.pool, sql_where, args, **kwargs)
+        elif isinstance(model_type, ViewTableMetaclass):
+            result = await model_type.do(self.pool, sql_where, args, **kwargs)
         return result
 
     async def select(self, tempMetaModelObj, sql_where, args=None, toDict=False, **kwargs):
         """
-        对临时表对象进行投影操作
+        对临时表进行投影操作
         :param tempMetaModelObj: 临时表类
         :param sql_where: where 子句，必须使用的``分割不同的属性，同时前面加上多表的let名。如 table1->t1: t1.`postId`=?
         :param args: where 的参数, 如果没有使用?可以为空。注意如果右是一个表的属性，请在 where 中指定

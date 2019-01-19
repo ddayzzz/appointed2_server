@@ -139,9 +139,37 @@ class ResponseMiddleware(Middleware):
             return resp
         else:
             resp = Response(
-                body=json.dumps(response, ensure_ascii=False, default=lambda o: o.__dict__()).encode('utf-8'), status=status)
+                body=json.dumps(response, ensure_ascii=False, default=lambda o: self._dump_json_hook(o)).encode('utf-8'), status=status)
             resp.content_type = 'application/json;charset=utf-8'
             return resp
+
+    def _handle_list_tuple(self, request, response, status=200):
+        """
+        default handler for list and tuple
+        :param request:
+        :param response:
+        :param status:
+        :return:
+        """
+        resp = Response(
+            body=json.dumps(response, ensure_ascii=False, default=lambda o: self._dump_json_hook(o)).encode('utf-8'),
+            status=status)
+        resp.content_type = 'application/json;charset=utf-8'
+        return resp
+
+    def _handle_set(self, request, response, status=200):
+        """
+        default handler for set
+        :param request:
+        :param response:
+        :param status:
+        :return:
+        """
+        resp = Response(
+            body=json.dumps(response, ensure_ascii=False, default=lambda o: self._dump_json_hook(o)).encode('utf-8'),
+            status=status)
+        resp.content_type = 'application/json;charset=utf-8'
+        return resp
 
     def _handle_int(self, request, response):
         """
@@ -188,6 +216,14 @@ class ResponseMiddleware(Middleware):
             'status': 500
         }, status=500)
 
+    def _dump_json_hook(self, obj):
+        """
+        when serialize object into json object, this is hook for dumping obj
+        :param obj: object to dump
+        :return: serialize-able obj
+        """
+        return obj.__dict__()
+
     async def __call__(self, request, handler):
         try:
             r = await handler(request)
@@ -202,6 +238,10 @@ class ResponseMiddleware(Middleware):
                 return self._handle_string(request=request, response=r)
             if isinstance(r, dict):
                 return self._handle_dict(request=request, response=r)
+            if isinstance(r, (tuple, list)):
+                return self._handle_list_tuple(request=request, response=r)
+            if isinstance(r, set):
+                return self._handle_set(request=request, response=r)
             if isinstance(r, int) and r >= 100 and r < 600:  # 这个是保留的响应代码。有的可能需要
                 return self._handle_int(request=request, response=r)
             # default:

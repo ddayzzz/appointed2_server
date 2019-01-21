@@ -7,6 +7,7 @@ __doc__ = 'Appointed2 - defined some basic middlewares for ap_http server'
 
 from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPError, HTTPNotFound
 from ap_logger.logger import make_logger
+from ap_http import exceptions
 from abc import abstractmethod
 import json
 import hashlib
@@ -258,6 +259,9 @@ class ResponseMiddleware(Middleware):
             # _response_handler_logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
             #              exc_info=True, stack_info=False)
             return self._handle_server_exception(request=request, exc=e)
+        except exceptions.CallbackError as e:
+            _response_handler_logger.error("Can't call the route handler: {0}".format(e.message))
+            return self._handle_route_exception(request=request, exc=e)
         except Exception as e:
             _response_handler_logger.error("Faild to handle request, with router's inner exception : '{0}'".format(e), exc_info=True, stack_info=False)
             return self._handle_route_exception(request=request, exc=e)

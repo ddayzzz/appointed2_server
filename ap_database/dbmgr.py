@@ -4,23 +4,21 @@ __version__ = '0.0.0.1'
 __all__ = ["MySQLManager", "SQLManager"]
 __doc__ = 'Appointed2 - SQL manager'
 from ap_database.orm import ModelMetaclass, Model, TempModelMetaclass, TempModel, ViewTableMetaclass, ViewTable
-from ap_database.orm import create_pool as _createpool
-from ap_database.orm import destory_pool as _despool
+from ap_logger.logger import make_logger
 from asyncio import get_event_loop
+import aiomysql
 import abc
+
+import sys
+if sys.version_info[:2] <= (3, 6):
+    from async_generator import asynccontextmanager  # for python 3.6
+else:
+    from contextlib import asynccontextmanager  # python3.7
 
 
 class SQLManager(object):
 
     def __init__(self):
-        pass
-
-    @abc.abstractmethod
-    async def connect(self):
-        pass
-
-    @abc.abstractmethod
-    async def close(self):
         pass
 
     @abc.abstractmethod
@@ -47,8 +45,34 @@ class SQLManager(object):
     async def select(self, tempMetaModelObj, sql_where, args=None, toDict=False, **kwargs):
         pass
 
+    @abc.abstractmethod
+    async def inner_select(self, sql, args, size=None):
+        """
+        select adapter
+        :param pool:
+        :param sql:
+        :param args:
+        :param size:
+        :return:
+        """
+        pass
+
+    @abc.abstractmethod
+    async def inner_execute(self, sql, args, autocommit=True):
+        pass
+
+    @abc.abstractmethod
+    async def close(self):
+        pass
+
+    @abc.abstractmethod
+    async def connect(self, **kwargs):
+        pass
+
 
 class MySQLManager(SQLManager):
+
+    SQL_LOGGER = make_logger('MYSQLMGR')
 
     def __init__(self, username, password, dbname, host, port, loop=None):
         """
@@ -71,17 +95,101 @@ class MySQLManager(SQLManager):
         if not loop:
             self.loop = get_event_loop()
 
-
     async def close(self):
-        await _despool(self.pool)
+        """
+        关闭数据库的连接池
+        :return:
+        """
+        self.SQL_LOGGER.debug('Closing a database connection pool...')
+        if self.pool is not None:
+            self.pool.close()
+            await self.pool.wait_closed()
         self.pool = None
 
-    async def connect(self):
-        self.pool = await _createpool(loop=self.loop, username=self.username, password=self.password, dbname=self.dbname, host=self.host, port=self.port)
+    async def connect(self, **kwargs):
+        self.SQL_LOGGER.debug('Creating a database connection pool...')
+        self.pool = await aiomysql.create_pool(
+            host=self.host,
+            port=self.port,
+            user=self.username,
+            password=self.password,
+            db=self.dbname,
+            charset=kwargs.get('charset', 'utf8'),
+            # http://www.liaoxuefeng.com/discuss/001409195742008d822b26cf3de46aea14f2b7378a1ba91000/001451894920450a22651047f7f4a4ca2d0aea99d1452a2000
+            autocommit=kwargs.get('autocommit', True),
+            maxsize=kwargs.get('maxsize', 10),
+            minsize=kwargs.get('minsize', 1),
+            loop=self.loop
+        )
 
     @property
     def connected(self):
-        return self.pool
+        return self.pool is not None
+
+    async def inner_select(self, sql, args, size=None):
+        """
+        perform a select operation. the default is DictCursor which is return a dict object.
+        :param pool: connection pool
+        :param sql: sql, placeholder is ?
+        :param args: arguments for placeholders
+        :param size: limited size
+        :return: result, format is based on the type of cursor
+        """
+        self.SQL_LOGGER.debug('Perform: %s' % sql)
+        async with self.pool.get() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql.replace('?', '%s'), args or ())
+                if size:
+                    rs = await cur.fetchmany(size)
+                else:
+                    rs = await cur.fetchall()
+                self.SQL_LOGGER.debug('Row effected: %s' % cur.rowcount)
+            return rs
+
+    async def inner_execute(self, sql, args, autocommit=True):
+        """
+        This is proxy for performing the insert, update, delete on table
+        :param pool:
+        :param sql:
+        :param args:
+        :param autocommit:
+        :return: return the number of affected rows
+        """
+        self.SQL_LOGGER.debug(sql)
+        async with self.pool.get() as conn:
+            if not autocommit:
+                await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(sql.replace('?', '%s'), args)
+                    affected = cur.rowcount
+                if not autocommit:
+                    await conn.commit()  # 如果没有自动保存修改就会立即修改
+            except BaseException as e:
+                if not autocommit:
+                    await conn.rollback()
+                raise
+            return affected
+
+    @asynccontextmanager
+    async def inner_select_on_large(self, sql, args):
+        """
+        query large data with stream cursor
+        需要注意的是 https://blog.csdn.net/weixin_41287692/article/details/83545891
+        1. 因为 SSCursor 是没有缓存的游标,结果集只要没取完，这个 conn 是不能再处理别的 sql，包括另外生成一个 cursor 也不行的。如果需要干别的，请另外再生成一个连接对象。
+        2. 每次读取后处理数据要快，不能超过 60 s，否则 mysql 将会断开这次连接，也可以修改 SET NET_WRITE_TIMEOUT = xx 来增加超时间隔。
+        使用额外库提供的 async 上下文管理器(python <= 3.6; 3.7 原生)避免 cur 在外部关闭, https://stackoverflow.com/questions/37433157/asynchronous-context-manager
+        可以在 cursor 上调用 cursor 的相关异步方法获取数据 https://aiomysql.readthedocs.io/en/latest/cursors.html
+        :param sql: sql, the format of placeholders is ?
+        :param args: arguments for placeholder
+        :param async_map_callback: asynchronous unary closure for format the data in result
+        :return:
+        """
+        self.SQL_LOGGER.debug('Perform: %s' % sql)
+        async with self.pool.get() as conn:
+            async with conn.cursor(aiomysql.SSDictCursor) as cur:  # stream and dict cursor
+                await cur.execute(sql.replace('?', '%s'), args or ())
+                yield cur
 
     async def ensureConnected(self):
         if not self.connected:
@@ -97,13 +205,13 @@ class MySQLManager(SQLManager):
         await self.ensureConnected()
         if isinstance(model_type_or_object, Model):
             # 是Model的字类的实例
-            await model_type_or_object.save(self.pool)
+            await model_type_or_object.insert(self)
         elif isinstance(model_type_or_object, ModelMetaclass):
             # 是Model的元类
             obj = model_type_or_object(**fields_include_primary_keys)
             if not obj:
                 raise ValueError('无法创建指定的对象‘%s’，通过属性：%s' % (str(model_type_or_object), ','.join(['%s=%s' % (k, v) for k, v in fields_include_primary_keys.items()])))
-            await obj.save(self.pool)
+            await obj.insert(self)
         else:
             raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
 
@@ -117,7 +225,7 @@ class MySQLManager(SQLManager):
         await self.ensureConnected()
         if not isinstance(model_type, ModelMetaclass):
             raise ValueError(str(model_type) + '不是 "Model"的一个子类。')
-        obj = await model_type.find(self.pool, **obj_primaryKeys)
+        obj = await model_type.query_with_primary_keys(self, **obj_primaryKeys)
         return obj
 
     async def delete(self, model_type_or_object, **obj_primaryKeys):
@@ -130,19 +238,19 @@ class MySQLManager(SQLManager):
         await self.ensureConnected()
         if isinstance(model_type_or_object, Model):
             # 是Model的字类的实例
-            await model_type_or_object.remove(self.pool)
+            await model_type_or_object.query_with_primary_keys(self)
         elif isinstance(model_type_or_object, ModelMetaclass):
             # 是Model的元类
             obj = await self.query(model_type_or_object, **obj_primaryKeys)
             if not obj:
                 raise ValueError('没有找到条目：%s' % ','.join(['%s=%s' % (k, v) for k, v in obj_primaryKeys.items()]))
-            await obj.remove(self.pool)
+            await obj.delete(self)
         else:
             raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
 
     async def update(self, model_type_or_object, ignore_not_exists=False, **kwargs):
         """
-        更新对象或者数据库中的条目
+        更新对象或者数据库中的条目(主键除外)
         :param model_type_or_object: Model的子类实例或者是Metalass 的子类
         :param ignore_not_exists: 为 True 在不存在的这个对象的时候创建一个新的对象；否则抛出异常
         :param kwargs: 更新的主键以及其他的属性
@@ -167,7 +275,7 @@ class MySQLManager(SQLManager):
             raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
         for k, v in kwargs.items():
             obj.__setattr__(k, v)
-        await obj.update(self.pool)
+        await obj.save_change(self)
 
     async def queryAll(self, model_type, sql_where=None, args=None, **kwargs):
         """
@@ -180,9 +288,9 @@ class MySQLManager(SQLManager):
         """
         await self.ensureConnected()
         if isinstance(model_type, ModelMetaclass):
-            result = await model_type.findAll(self.pool, sql_where, args, **kwargs)
+            result = await model_type.query_all(self, sql_where, args, **kwargs)
         elif isinstance(model_type, ViewTableMetaclass):
-            result = await model_type.do(self.pool, sql_where, args, **kwargs)
+            result = await model_type.select(self, sql_where, args, **kwargs)
         return result
 
     async def select(self, tempMetaModelObj, sql_where, args=None, toDict=False, **kwargs):
@@ -200,7 +308,7 @@ class MySQLManager(SQLManager):
                 raise ValueError("不支持在结果为字典类型的情况下使用 orderby 子句。")
             await self.ensureConnected()
             # 执行 orm 的操作
-            return await tempMetaModelObj.do(self.pool, sql_where, args, toDict=toDict, **kwargs)
+            return await tempMetaModelObj.select(self, sql_where, args, toDict=toDict, **kwargs)
         elif isinstance(tempMetaModelObj, TempModel):
             raise ValueError('不支持在非临时表的子类对象进行操作，请使用临时表"TempModel"的子类对象进行操作。')
         else:

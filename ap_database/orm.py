@@ -6,14 +6,14 @@
 # ref03：https://github.com/wl356485255/pythonORM/blob/master/ormTest.py
 __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
-__all__ = ['create_pool', 'select', 'execute', 'create_args_string',
+__all__ = ['create_args_string',
            'Field', 'StringField', 'BooleanField', 'IntegerField', 'FloatField', 'TextField', 'SmallIntField', 'DateTimeField',
            'ModelMetaclass', 'Model','TempModel', 'TempModelMetaclass',
-           'destory_pool']
+           'ViewTable', 'ViewTableMetaclass']
 __doc__ = 'Appointed2 - ORM define'
 
-import aiomysql
-from datetime import datetime
+
+
 from ap_logger.logger import make_logger
 
 
@@ -30,57 +30,6 @@ def server_warning(msg):
 def server_info(msg):
     _logger.info('SQL: %s' % (msg))
 
-
-async def create_pool(loop, **kw):
-    server_debug('Creating a database connection pool...')
-    __pool = await aiomysql.create_pool(
-        host=kw.get('host', 'localhost'),
-        port=kw.get('port', 3306),
-        user=kw['username'],
-        password=kw['password'],
-        db=kw['dbname'],
-        charset=kw.get('charset', 'utf8'),
-        # http://www.liaoxuefeng.com/discuss/001409195742008d822b26cf3de46aea14f2b7378a1ba91000/001451894920450a22651047f7f4a4ca2d0aea99d1452a2000
-        autocommit=kw.get('autocommit', True),
-        maxsize=kw.get('maxsize', 10),
-        minsize=kw.get('minsize', 1),
-        loop=loop
-    )
-    return __pool
-
-
-# 这个是封装SQL的select语句
-async def select(pool, sql, args, size=None):
-    server_debug(sql)
-    async with pool.get() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql.replace('?', '%s'), args or ())
-            if size:
-                rs = await cur.fetchmany(size)
-            else:
-                rs = await cur.fetchall()
-        server_debug('Row effected: %s' % len(rs))
-        return rs
-
-
-# 封装INSERT, UPDATE, DELETE 语句
-# 返回操作影响的行号
-async def execute(pool, sql, args, autocommit=True):
-    server_debug(sql)
-    async with pool.get() as conn:
-        if not autocommit:
-            await conn.begin()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(sql.replace('?', '%s'), args)
-                affected = cur.rowcount
-            if not autocommit:
-                await conn.commit()  # 如果没有自动保存修改就会立即修改
-        except BaseException as e:
-            if not autocommit:
-                await conn.rollback()
-            raise
-        return affected
 
 
 # 根据输入的参数生成的占位符列表
@@ -336,6 +285,7 @@ class ViewTableMetaclass(type):
 
 
 class Model(dict, metaclass=ModelMetaclass):
+
     def __init__(self, **kw):
         super(Model, self).__init__(**kw)
 
@@ -363,8 +313,15 @@ class Model(dict, metaclass=ModelMetaclass):
 
     @classmethod
     # 类方法有类变量cls传入，从而可以用cls做一些相关的处理。并且有子类继承时，调用该类方法时，传入的类变量cls是子类，而非父类。
-    async def findAll(cls, pool, where=None, args=None, **kw):
-        '''find objects by where clause'''
+    async def query_all(cls, dbm, where=None, args=None, **kw):
+        """
+        generate all code for quering all the records
+        :param dbm: dbm
+        :param where: where sql, the placeholder is ?
+        :param args: arguments for placeholders
+        :param kw: orderBy: string; limit: int
+        :return: result
+        """
         sql = [cls.__select__]
 
         if where:
@@ -390,61 +347,86 @@ class Model(dict, metaclass=ModelMetaclass):
                 args.extend(limit)
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
-        rs = await select(pool, ' '.join(sql), args)
+        # rs = await select(pool, ' '.join(sql), args)
+        rs = await dbm.inner_select(' '.join(sql), args)  # perform the execute
         return [cls(**r) for r in rs]
 
     @classmethod
-    async def findNumber(cls, pool, selectField, where=None, args=None):
-        '''find number by select and where.'''
-        sql = ['select %s __num__ from `%s`' % (selectField, cls.__table__)]
+    async def query_count(cls, dbm, where=None, args=None):
+        """
+        find how many records in table. Always count *
+        :param dbm:
+        :param where:
+        :param args:
+        :return: number of records
+        """
+        sql = ['select COUNT(*) from `%s`' % cls.__table__]
         if where:
             sql.append('where')
             sql.append(where)
-        rs = await select(pool, ' '.join(sql), args, 1)
+        rs = await dbm.inner_select(' '.join(sql), args, 1)
         if len(rs) == 0:
-            return None
-        return rs[0]['__num__']
+            return 0
+        return rs[0]
 
     @classmethod
-    async def find(cls, pool, **primarykeys):
+    async def query_with_primary_keys(cls, dbm, **primarykeys):
         """
-        :param pool:
+        find an object by primary key
+        :param dbm:
         :param primarykeys:
-        :return:
+        :return: an object or None
         """
-        '''find object by primary key'''
         # 主要 primary 的顺序
         pri_size = len(cls.__primary_keys__)
         if len(primarykeys) < pri_size:  # 可以多，但是不能少
             raise RuntimeError("Not enough primary key(s) specified")  # 主键长度不完整
         pri_keys = [primarykeys.get(pri_fieldName) for pri_fieldName in cls.__primary_keys__]
 
-        rs = await select(pool, '%s where %s' % (cls.__select__, cls.__primary_key_fields__), pri_keys, 1)
+        rs = await dbm.inner_select('%s where %s' % (cls.__select__, cls.__primary_key_fields__), pri_keys, 1)
         if len(rs) == 0:
             return None
         return cls(**rs[0])
 
-    async def save(self, pool):
+    async def insert(self, dbm):
+        """
+        insert this object into table
+        :param dbm:
+        :return: number of affected rows
+        """
         args = list(map(self.getValueOrDefault, self.__fields__))
         args.extend(list(map(self.getValueOrDefault, self.__primary_keys__)))
 
         # print(self.__insert__)
-        rows = await execute(pool, self.__insert__, args)
+        rows = await dbm.inner_execute(self.__insert__, args)
         if rows != 1:
             server_warning('Failed to insert an entry, effected row(s): %d' % rows)  # 插入一条记录失败: 受影响 rows 的数量: %s
+        return rows
 
-    async def update(self, pool):
+    async def save_change(self, dbm):
+        """
+        update this in table except primary key
+        :param dbm:
+        :return: number of affected rows
+        """
         args = list(map(self.getValue, self.__fields__))
         args.extend(list(map(self.getValue, self.__primary_keys__)))
-        rows = await execute(pool, self.__update__, args)
+        rows = await dbm.inner_execute(self.__update__, args)
         if rows != 1:
             server_warning('Failed to update an entry, effected row(s): %d' % rows)
+        return rows
 
-    async def remove(self, pool):
+    async def delete(self, dbm):
+        """
+        delete this object in table
+        :param dbm:
+        :return: number of affected rows
+        """
         args = list(map(self.getValue, self.__primary_keys__))
-        rows = await execute(pool, self.__delete__, args)
+        rows = await dbm.inner_execute(self.__delete__, args)
         if rows != 1:
             server_warning('Failed to delete an entry, effected row(s): %d' % rows)
+        return rows
 
 
 class TempModel(dict, metaclass=TempModelMetaclass):
@@ -465,10 +447,10 @@ class TempModel(dict, metaclass=TempModelMetaclass):
         return getattr(self, key, None)
 
     @classmethod
-    async def do(cls, pool, where, args, **kw):
+    async def select(cls, dbm, where, args, **kw):
         """
         在临时表中处理查询操作
-        :param pool: 连接池
+        :param dbm: 数据库管理对象
         :param where: where 子句
         :param args: where 查询的参数
         :param kw: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量;toDict 表示是否将结果转换为 dict 形式
@@ -502,7 +484,7 @@ class TempModel(dict, metaclass=TempModelMetaclass):
                 args.extend(limit)
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
-        rs = await select(pool, ' '.join(sql), args)
+        rs = await dbm.inner_select(' '.join(sql), args)
         # 检查是否有主键
         if toDict:
             pkName, pkObj = cls.__primaryKey__  # 获取设置的主键
@@ -537,10 +519,10 @@ class ViewTable(dict, metaclass=ViewTableMetaclass):
         return getattr(self, key, None)
 
     @classmethod
-    async def do(cls, pool, where, args, **kw):
+    async def select(cls, dbm, where, args, **kw):
         """
         在视图中处理查询操作, 其实可以复用 临时表的查询
-        :param pool: 连接池
+        :param dbm: 数据库管理对象
         :param where: where 子句
         :param args: where 查询的参数
         :param kw: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量;
@@ -571,13 +553,9 @@ class ViewTable(dict, metaclass=ViewTableMetaclass):
                 args.extend(limit)
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
-        rs = await select(pool, ' '.join(sql), args)
+        rs = await dbm.inner_select(' '.join(sql), args)
 
         return [cls(**r) for r in rs]
 
 
-async def destory_pool(pool):
-    server_debug('Closing a database connection pool...')
-    if pool is not None:
-        pool.close()
-        await pool.wait_closed()
+

@@ -13,5 +13,5 @@ setup(name='appointed2',
           url='https://ddayzzz.wang',
           packages=['ap_database', 'ap_deploy', 'ap_http', 'ap_logger'],
           install_requires=deps,
-          python_requires='>=3.5.3')
+          python_requires='>=3.6')
 

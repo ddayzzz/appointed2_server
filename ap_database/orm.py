@@ -8,6 +8,7 @@ __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
 __all__ = ['create_args_string',
            'Field', 'StringField', 'BooleanField', 'IntegerField', 'FloatField', 'TextField', 'SmallIntField', 'DateTimeField',
+           'BasicModel',
            'ModelMetaclass', 'Model','TempModel', 'TempModelMetaclass',
            'ViewTable', 'ViewTableMetaclass']
 __doc__ = 'Appointed2 - ORM define'
@@ -282,18 +283,20 @@ class ViewTableMetaclass(type):
 # 基于字典查询形式
 # Model从dict继承，拥有字典的所有功能，同时实现特殊方法__getattr__和__setattr__，能够实现属性操作
 # 实现数据库操作的所有方法，定义为class方法，所有继承自Model都具有数据库操作方法
+class BasicModel(dict):
 
-
-class Model(dict, metaclass=ModelMetaclass):
+    """
+    定义基本的模型, 这个是所有临时表 视图 基本表拥有的操作
+    """
 
     def __init__(self, **kw):
-        super(Model, self).__init__(**kw)
+        super(BasicModel, self).__init__(**kw)
 
     def __getattr__(self, key):
         try:
             return self[key]
         except KeyError:
-            raise AttributeError(r'"Model" objct has not attribute: %s' % (key))
+            raise AttributeError(r'"%s" objct has not attribute: %s' % (self.__class__.__name__, key))
 
     def __setattr__(self, key, value):
         self[key] = value
@@ -315,7 +318,7 @@ class Model(dict, metaclass=ModelMetaclass):
     # 类方法有类变量cls传入，从而可以用cls做一些相关的处理。并且有子类继承时，调用该类方法时，传入的类变量cls是子类，而非父类。
     async def query_all(cls, dbm, where=None, args=None, **kw):
         """
-        generate all code for quering all the records
+        perform select operation
         :param dbm: dbm
         :param where: where sql, the placeholder is ?
         :param args: arguments for placeholders
@@ -367,7 +370,7 @@ class Model(dict, metaclass=ModelMetaclass):
         rs = await dbm.inner_select(' '.join(sql), args, 1)
         if len(rs) == 0:
             return 0
-        return rs[0]
+        return rs[0]['COUNT(*)']  # DictCursor
 
     @classmethod
     async def query_with_primary_keys(cls, dbm, **primarykeys):
@@ -387,6 +390,12 @@ class Model(dict, metaclass=ModelMetaclass):
         if len(rs) == 0:
             return None
         return cls(**rs[0])
+
+
+class Model(BasicModel, metaclass=ModelMetaclass):
+
+    def __init__(self, **kw):
+        super(Model, self).__init__(**kw)
 
     async def insert(self, dbm):
         """
@@ -429,25 +438,13 @@ class Model(dict, metaclass=ModelMetaclass):
         return rows
 
 
-class TempModel(dict, metaclass=TempModelMetaclass):
+class TempModel(BasicModel, metaclass=TempModelMetaclass):
 
     def __init__(self, **kw):
         super(TempModel, self).__init__(**kw)
 
-    def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(r'"TempModel" objct has not attribute: %s' % (key))
-
-    def __setattr__(self, key, value):
-        self[key] = value
-
-    def getValue(self, key):
-        return getattr(self, key, None)
-
     @classmethod
-    async def select(cls, dbm, where, args, **kw):
+    async def query_all(cls, dbm, where=None, args=None, **kw):
         """
         在临时表中处理查询操作
         :param dbm: 数据库管理对象
@@ -501,61 +498,15 @@ class TempModel(dict, metaclass=TempModelMetaclass):
             return [cls(**r) for r in rs]
 
 
-class ViewTable(dict, metaclass=ViewTableMetaclass):
+class ViewTable(BasicModel, metaclass=ViewTableMetaclass):
 
     def __init__(self, **kw):
         super(ViewTable, self).__init__(**kw)
 
-    def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(r'"ViewTable" objct has not attribute: %s' % (key))
-
-    def __setattr__(self, key, value):
-        self[key] = value
-
-    def getValue(self, key):
-        return getattr(self, key, None)
-
     @classmethod
-    async def select(cls, dbm, where, args, **kw):
-        """
-        在视图中处理查询操作, 其实可以复用 临时表的查询
-        :param dbm: 数据库管理对象
-        :param where: where 子句
-        :param args: where 查询的参数
-        :param kw: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量;
-        :return:
-        """
-        sql = [cls.__select__]
+    async def query_with_primary_keys(cls, dbm, **primarykeys):
+        raise NotImplementedError("View doesn't support query with primary keys")
 
-        if where:
-            sql.append('where')
-            sql.append(where)
-
-        if args is None:
-            args = []
-
-        orderBy = kw.get('orderBy', None)
-        if orderBy:
-            sql.append('order by')
-            sql.append(orderBy)
-
-        limit = kw.get('limit', None)
-        if limit is not None:
-            sql.append('limit')
-            if isinstance(limit, int):
-                sql.append('?')
-                args.append(limit)
-            elif isinstance(limit, tuple) and len(limit) == 2:
-                sql.append('?,?')
-                args.extend(limit)
-            else:
-                raise ValueError('Invalid limit value: %s' % str(limit))
-        rs = await dbm.inner_select(' '.join(sql), args)
-
-        return [cls(**r) for r in rs]
 
 
 

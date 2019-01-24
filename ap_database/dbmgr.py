@@ -3,7 +3,7 @@ __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
 __all__ = ["MySQLManager", "SQLManager"]
 __doc__ = 'Appointed2 - SQL manager'
-from ap_database.orm import ModelMetaclass, Model, TempModelMetaclass, TempModel, ViewTableMetaclass, ViewTable
+from ap_database.orm import ModelMetaclass, Model, TempModelMetaclass, TempModel, ViewTableMetaclass, ViewTable, BasicModel
 from ap_logger.logger import make_logger
 from asyncio import get_event_loop
 import aiomysql
@@ -11,7 +11,7 @@ import abc
 
 import sys
 if sys.version_info[:2] <= (3, 6):
-    from async_generator import asynccontextmanager  # for python 3.6
+    from async_generator import async_generator, asynccontextmanager  # for python 3.6
 else:
     from contextlib import asynccontextmanager  # python3.7
 
@@ -46,7 +46,7 @@ class SQLManager(object):
         pass
 
     @abc.abstractmethod
-    async def inner_select(self, sql, args, size=None):
+    async def inner_select(self, sql, args, size=None, **kwargs):
         """
         select adapter
         :param pool:
@@ -58,7 +58,7 @@ class SQLManager(object):
         pass
 
     @abc.abstractmethod
-    async def inner_execute(self, sql, args, autocommit=True):
+    async def inner_execute(self, sql, args, autocommit=True, **kwargs):
         pass
 
     @abc.abstractmethod
@@ -69,9 +69,16 @@ class SQLManager(object):
     async def connect(self, **kwargs):
         pass
 
+    @abc.abstractmethod
+    async def countNum(self, model_type, sql_where=None, args=None):
+        pass
+
 
 class MySQLManager(SQLManager):
 
+    """
+    使用 aiomysql 的异步 MySQL 连接器，目前仅仅对 删 改 进行异常检查
+    """
     SQL_LOGGER = make_logger('MYSQLMGR')
 
     def __init__(self, username, password, dbname, host, port, loop=None):
@@ -126,7 +133,7 @@ class MySQLManager(SQLManager):
     def connected(self):
         return self.pool is not None
 
-    async def inner_select(self, sql, args, size=None):
+    async def inner_select(self, sql, args, size=None, **kwargs):
         """
         perform a select operation. the default is DictCursor which is return a dict object.
         :param pool: connection pool
@@ -146,7 +153,7 @@ class MySQLManager(SQLManager):
                 self.SQL_LOGGER.debug('Row effected: %s' % cur.rowcount)
             return rs
 
-    async def inner_execute(self, sql, args, autocommit=True):
+    async def inner_execute(self, sql, args, autocommit=True, *kwargs):
         """
         This is proxy for performing the insert, update, delete on table
         :param pool:
@@ -172,9 +179,9 @@ class MySQLManager(SQLManager):
             return affected
 
     @asynccontextmanager
-    async def inner_select_on_large(self, sql, args):
+    async def inner_select_on_large(self, sql, args, **kwargs):
         """
-        query large data with stream cursor
+        query large data with stream cursor. please ensure the connection by call the method 'ensureConnected'
         需要注意的是 https://blog.csdn.net/weixin_41287692/article/details/83545891
         1. 因为 SSCursor 是没有缓存的游标,结果集只要没取完，这个 conn 是不能再处理别的 sql，包括另外生成一个 cursor 也不行的。如果需要干别的，请另外再生成一个连接对象。
         2. 每次读取后处理数据要快，不能超过 60 s，否则 mysql 将会断开这次连接，也可以修改 SET NET_WRITE_TIMEOUT = xx 来增加超时间隔。
@@ -183,13 +190,16 @@ class MySQLManager(SQLManager):
         :param sql: sql, the format of placeholders is ?
         :param args: arguments for placeholder
         :param async_map_callback: asynchronous unary closure for format the data in result
-        :return:
+        :return:return an instance of DictCursor in async contextmanager, you can call async method fetchone, fetchmany.
         """
         self.SQL_LOGGER.debug('Perform: %s' % sql)
         async with self.pool.get() as conn:
             async with conn.cursor(aiomysql.SSDictCursor) as cur:  # stream and dict cursor
                 await cur.execute(sql.replace('?', '%s'), args or ())
-                yield cur
+                try:
+                    yield cur
+                finally:
+                    await cur.close()
 
     async def ensureConnected(self):
         if not self.connected:
@@ -211,7 +221,7 @@ class MySQLManager(SQLManager):
             obj = model_type_or_object(**fields_include_primary_keys)
             if not obj:
                 raise ValueError('无法创建指定的对象‘%s’，通过属性：%s' % (str(model_type_or_object), ','.join(['%s=%s' % (k, v) for k, v in fields_include_primary_keys.items()])))
-            await obj.insert(self)
+            await obj.insert(dbm=self)
         else:
             raise ValueError(str(model_type_or_object) + '不是 "Model"的一个子类。')
 
@@ -223,9 +233,9 @@ class MySQLManager(SQLManager):
         :return: 返回对象或者抛出错误
         """
         await self.ensureConnected()
-        if not isinstance(model_type, ModelMetaclass):
-            raise ValueError(str(model_type) + '不是 "Model"的一个子类。')
-        obj = await model_type.query_with_primary_keys(self, **obj_primaryKeys)
+        # if not isinstance(model_type, BasicModel):  # 只有元类的实例才判断继承关系
+        #     raise ValueError(str(model_type) + '不是 "BasicModel" 的一个子类。该类必须支持投影操作')
+        obj = await model_type.query_with_primary_keys(dbm=self, **obj_primaryKeys)  # 视图会自动出错
         return obj
 
     async def delete(self, model_type_or_object, **obj_primaryKeys):
@@ -279,38 +289,31 @@ class MySQLManager(SQLManager):
 
     async def queryAll(self, model_type, sql_where=None, args=None, **kwargs):
         """
-        自定义查询(对于视图和基本表)
+        自定义查询, 正对一个已经存在的基本表、视图和临时表对象进行查询
         :param model_type: ORM元类的子类
         :param sql_where: SQL语句，使用?占位
         :param args: 占位符的实际值
-        :param kwargs: 其他的参数
+        :param kwargs: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量； toDict: 针对临时表。返回的结果是否保存为唯一的主键映射->其他的属性，默认关闭。注意需要在 ORM 中指定唯一的主键。注意，如果使用了排序那么无效。
         :return:
         """
         await self.ensureConnected()
-        if isinstance(model_type, ModelMetaclass):
-            result = await model_type.query_all(self, sql_where, args, **kwargs)
-        elif isinstance(model_type, ViewTableMetaclass):
-            result = await model_type.select(self, sql_where, args, **kwargs)
-        return result
+        # if not isinstance(model_type, BasicModel):
+        #     raise ValueError(str(model_type) + '不是 "BasicModel" 的一个子类。该类必须支持投影操作')
+        obj = await model_type.query_all(self, where=sql_where, args=args, **kwargs)
+        return obj
 
-    async def select(self, tempMetaModelObj, sql_where, args=None, toDict=False, **kwargs):
+    async def countNum(self, model_type, sql_where=None, args=None):
         """
-        对临时表进行投影操作
-        :param tempMetaModelObj: 临时表类
-        :param sql_where: where 子句，必须使用的``分割不同的属性，同时前面加上多表的let名。如 table1->t1: t1.`postId`=?
-        :param args: where 的参数, 如果没有使用?可以为空。注意如果右是一个表的属性，请在 where 中指定
-        :param toDict: 返回的结果是否保存为唯一的主键映射->其他的属性，默认关闭。注意需要在 ORM 中指定唯一的主键。注意，如果使用了排序那么无效。
-        :param kwargs: 其他参数，orderBy 表示排序;limit 表示限制的结果过数量
-        :return:
+        count the number of records specified by primary keys
+        :param model_type: Model type. not the instance of the model
+        :param obj_primaryKeys: primary keys
+        :return: number
         """
-        if isinstance(tempMetaModelObj, TempModelMetaclass):
-            if toDict and kwargs.get('orderBy', None):
-                raise ValueError("不支持在结果为字典类型的情况下使用 orderby 子句。")
-            await self.ensureConnected()
-            # 执行 orm 的操作
-            return await tempMetaModelObj.select(self, sql_where, args, toDict=toDict, **kwargs)
-        elif isinstance(tempMetaModelObj, TempModel):
-            raise ValueError('不支持在非临时表的子类对象进行操作，请使用临时表"TempModel"的子类对象进行操作。')
-        else:
-            raise ValueError('不支持在非临时表上执行投影操作')
+        await self.ensureConnected()
+        # if not isinstance(model_type, BasicModel):
+        #     raise ValueError(str(model_type) + '不是 "BasicModel"的一个子类。')
+        num = await model_type.query_count(self, where=sql_where, args=args)
+        return num
+
+
 

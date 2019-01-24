@@ -223,7 +223,10 @@ class ResponseMiddleware(Middleware):
         :param obj: object to dump
         :return: serialize-able obj
         """
-        return obj.__dict__()
+        if obj and hasattr(obj, __dict__) and callable(obj.__dict__):
+            return obj.__dict__()
+        else:
+            return obj
 
     async def __call__(self, request, handler):
         try:

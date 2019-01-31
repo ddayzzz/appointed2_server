@@ -1,7 +1,7 @@
 # coding=utf-8
 __author__ = 'Shu Wang <wangshu214@live.cn>'
 __version__ = '0.0.0.1'
-__all__ = ['Middleware', 'ResponseMiddleware', 'make_auth_middleware', 'make_data_middleware', 'make_response_middleware']
+__all__ = ['Middleware', 'ResponseMiddleware', 'Jinja2TemplateResponseMiddleware', 'make_middleware_wrap']
 __doc__ = 'Appointed2 - defined some basic middlewares for ap_http server'
 
 
@@ -10,9 +10,8 @@ from ap_logger.logger import make_logger
 from ap_http import exceptions
 from abc import abstractmethod
 import json
-import hashlib
 import traceback
-from time import time
+
 
 
 _midware_logger = make_logger('MIDWARE')
@@ -29,25 +28,12 @@ class Middleware(object):
         pass
 
 
-def make_auth_middleware(auth_obj):
-    """
-    make a basic user auth middleware
-    :param auth_obj: Middleware or its derived class
-    :return:
-    """
-    if not isinstance(auth_obj, Middleware):
-        raise ValueError("'auth_obj' must be instance of Middleware")
-    @middleware
-    async def authorization_middleware(request, handler):
-        return await auth_obj(request=request, handler=handler)
-    return authorization_middleware
+class PrepareDataMiddleware(Middleware):
 
+    def __init__(self, *args, **kwargs):
+        super(PrepareDataMiddleware, self).__init__(*args, **kwargs)
 
-def make_data_middleware():
-
-    @middleware
-    async def data_preprocessor_middleware(request, handler):
-
+    async def __call__(self, request, handler):
         if request.method == 'POST':
             # 检查HTTP头的Content-Type
             if request.content_type.startswith('application/json'):
@@ -56,21 +42,7 @@ def make_data_middleware():
             elif request.content_type.startswith('application/x-www-form-urlencoded'):
                 request.__data__ = await request.post()  # 这个是表格的
                 _midware_logger.debug("Preprocess data from content type: '%s'" % request.content_type)
-
         return (await handler(request))
-    return data_preprocessor_middleware
-
-
-def make_response_middleware(response_middleware_obj):
-    """
-    middleware for different response handler
-    :param response_middleware_obj:
-    :return:
-    """
-    @middleware
-    async def response_middleware(request, handler):
-        return (await response_middleware_obj(request=request, handler=handler))
-    return response_middleware
 
 
 class ResponseMiddleware(Middleware):
@@ -80,7 +52,7 @@ class ResponseMiddleware(Middleware):
 
     def _handle_response(self, request, response):
         """
-        handle web response object
+        handle web.response object
         :param response: response object
         :return: response
         """
@@ -127,22 +99,16 @@ class ResponseMiddleware(Middleware):
 
     def _handle_dict(self, request, response, status=200):
         """
-        handle dict which will be Html Response or json response
+        handle dict, and return the response whose headers is applicationn/json
         :param request:
         :param response:
         :param status: default status for this response
         :return:
         """
-        if response.get('__template__'):
-            resp = Response(
-                body=request.app.template.get_template(response['__template__']).render(**response).encode('utf-8'), status=status)
-            resp.content_type = 'text/html;charset=utf-8'
-            return resp
-        else:
-            resp = Response(
-                body=json.dumps(response, ensure_ascii=False, default=lambda o: self._dump_json_hook(o)).encode('utf-8'), status=status)
-            resp.content_type = 'application/json;charset=utf-8'
-            return resp
+        resp = Response(
+            body=json.dumps(response, ensure_ascii=False, default=lambda o: self._dump_json_hook(o)).encode('utf-8'), status=status)
+        resp.content_type = 'application/json;charset=utf-8'
+        return resp
 
     def _handle_list_tuple(self, request, response, status=200):
         """
@@ -228,6 +194,7 @@ class ResponseMiddleware(Middleware):
         else:
             return obj
 
+    @middleware
     async def __call__(self, request, handler):
         try:
             r = await handler(request)
@@ -256,7 +223,7 @@ class ResponseMiddleware(Middleware):
             # _response_handler_logger.error(
             #     'Not found : {0} {1}'.format(request.method, request.path_qs),
             #     exc_info=False, stack_info=False)
-            return self._handle_server_exception(request=request.method, exc=e)
+            return self._handle_server_exception(request=request, exc=e)
         except HTTPError as e:
             # hide error info which will be present in aiohttp.access
             # _response_handler_logger.error("Faild to handle request, with exception : '{0}', status: {1}".format(e, e.status),
@@ -270,58 +237,119 @@ class ResponseMiddleware(Middleware):
             return self._handle_route_exception(request=request, exc=e)
 
 
-class UserAuthMiddleware(Middleware):
+class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
 
-    def __init__(self, cookie_name, cookie_key, type_of_user, dbmgr):
+    _DEFAULT_ERROR_STRING = '<h1>{reason}</h1><br><p>Method: {method}</p><br><p>Path: {path}</p>'
+
+    def __init__(self, templates_dir, filters=None, only_process_on_get=True, *args, **kwargs):
         """
-        UserAuth ctor
-        :param cookie_name: cookie name for auth user
-        :param cookie_key: cookie's key
-        :param type_of_user: user object which stored in ap_database, must be derived class of orm.Model and its primary key's name is id
-        :param dbmgr: ap_database manager, must be instance of DatabaseManager
+        jinja2 callback. If you want to render the jinja2 template, please return dict object with '__template__' set
+        :param templates_dir: root dir for jinja2 template htmls
+        :param filters: the initial filters. it must be a dict whose element is name->calllback
+        :param only_process_on_get: only render the template when request's method is GET
+        :param args:
+        :param kwargs:
+        """
+        super(Jinja2TemplateResponseMiddleware, self).__init__()
+        # 构造 jinja2 的模板初始化部分
+        from jinja2 import Environment, FileSystemLoader
+        options = dict(
+            autoescape=kwargs.get('autoescape', True),
+            block_start_string=kwargs.get('block_start_string', '{%'),
+            block_end_string=kwargs.get('block_end_string', '%}'),
+            variable_start_string=kwargs.get('variable_start_string', '{{'),
+            variable_end_string=kwargs.get('variable_end_string', '}}'),
+            auto_reload=kwargs.get('auto_reload', True)
+        )
+        env = Environment(loader=FileSystemLoader(templates_dir), **options)
+        if filters is not None:
+            for name, f in filters.items():
+                env.filters[name] = f
+        self.template = env
+        self.error_html = dict()
+        self.only_process_on_get = only_process_on_get
+
+    def add_filter(self, name, callback):
+        """
+        add filter for jinja2 inner-template callback
+        :param name: name, same as function name
+        :param callback: function
         :return:
         """
-        self.cookie_name = cookie_name
-        self.cookie_key = cookie_key
-        self.type_of_user = type_of_user
-        self.dbmgr = dbmgr
-        super(UserAuthMiddleware, self).__init__()
+        if self.template:
+            self.template.filters[name] = callback
 
-    async def decode(self, cookie_str):
+    def set_error_status_handle(self, error_status_code, filename):
+        self.error_html[error_status_code] = filename
+
+    def _render_template(self, doc, status, **kwargs):
+        resp = Response(
+            body=self.template.get_template(doc).render(**kwargs).encode('utf-8'),
+            status=status)
+        resp.content_type = 'text/html;charset=utf-8'
+        return resp
+
+    def _handle_dict(self, request, response, status=200):
         """
-        decode cookie to user string(basic use)
-        :param cookie_str: cookie str to decode
+        :param request:
+        :param response:
+        :param status:
         :return:
         """
-        if not cookie_str:
-            return None
-        L = cookie_str.split('-')
-        if len(L) != 3:
-            return None
-        uid, expires, sha1 = L
-        if int(expires) < time():
-            return None
-        user = await self.dbmgr.query(self.type_of_user, id=uid)
-        if user is None:
-            return None
-        s = '%s-%s-%s-%s' % (uid, user.passwd, expires, self.cookie_key)
-        if sha1 != hashlib.sha1(s.encode('utf-8')).hexdigest():
-            return None
-        user.passwd = '******'  # hide the password
-        return user
+        if response.get('__template__'):
+            return self._render_template(response['__template__'], status=status, **response)
 
-    async def __call__(self, request, handler):
-        request.__user__ = None
-        cookie_str = request.cookies.get(self.cookie_name)
-        user = ''
-        if cookie_str:
-            if 'deleted' not in cookie_str:
-                try:
-                    user = await self.decode(cookie_str)
-                except Exception as e:
-                    _midware_logger.error('Decode cookie str {0} failed, with exception: {1}'.format(cookie_str, type(e)))
-                    user = ''
-            if user:
-                request.__user__ = user
-                _midware_logger.debug('Set user from cookie \'%s\'' % cookie_str)
-        return await handler(request)
+    def _handle_server_exception(self, request, exc):
+        """
+
+        :param request:
+        :param exc: web exception whose status is available
+        :return:
+        """
+        # 检查相关处理
+        if self.only_process_on_get:
+            if request.method == 'GET':
+                html = self.error_html.get(exc.status)
+                if html:
+                    return self._render_template(html, exc.status,
+                                                 path=request.path,
+                                                 method=request.method,
+                                                 code=exc.status)
+        # 转换为普通的
+        resp = Response(
+            body=self._DEFAULT_ERROR_STRING.format(code=exc.status, method=request.method, path=request.path, reason=exc.reason),
+            status=exc.status)
+        resp.content_type = 'text/html;charset=utf-8'
+        return resp
+
+    def _handle_route_exception(self, request, exc):
+        # 检查相关处理
+        if self.only_process_on_get:
+            if request.method == 'GET':
+                html = self.error_html.get(exc.status)
+                if html:
+                    return self._render_template(html, exc.status,
+                                                 path=request.path,
+                                                 method=request.method,
+                                                 code=exc.status)
+        # 转换为普通的
+        resp = Response(
+            body=self._DEFAULT_ERROR_STRING.format(code=exc.status, method=request.method, path=request.path, reason=exc.reason),
+            status=exc.status)
+        resp.content_type = 'text/html;charset=utf-8'
+        return resp
+
+
+def make_middleware_wrap(middleware_obj):
+    """
+    create middleware. Work around for aiohttp that pass the app parameter to the middleware __call__ method asked request and handler
+    :param middleware_obj: Middleware or its derived class
+    :return:
+    """
+    if not isinstance(middleware_obj, Middleware):
+        raise ValueError("'middleware_obj' must be an instance of Middleware or its derived class")
+
+    @middleware
+    async def work_around_middleware(request, handler):
+        return await middleware_obj(request=request, handler=handler)
+    return work_around_middleware

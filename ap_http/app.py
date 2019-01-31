@@ -34,21 +34,6 @@ class BaseHttpApp(Application):
     def add_static(self, prefix, path, *args, **kwargs):
         self.router.add_static(prefix=prefix, path=path)
 
-    def add_template(self, path, **kw):
-        options = dict(
-            autoescape=kw.get('autoescape', True),
-            block_start_string=kw.get('block_start_string', '{%'),
-            block_end_string=kw.get('block_end_string', '%}'),
-            variable_start_string=kw.get('variable_start_string', '{{'),
-            variable_end_string=kw.get('variable_end_string', '}}'),
-            auto_reload=kw.get('auto_reload', True)
-        )
-        env = Environment(loader=FileSystemLoader(path), **options)
-        filters = kw.get('filters', None)
-        if filters is not None:
-            for name, f in filters.items():
-                env.filters[name] = f
-        self.template = env
 
     def add_route_group(self, name):
         rt = RouteGroup(imported_name=name)
@@ -60,10 +45,6 @@ class BaseHttpApp(Application):
             self.middlewares.append(middlewares)
         else:
             self.middlewares.extend(middlewares)  # iterable
-
-    def add_template_filter(self, name, callback):
-        if self.template:
-            self.template.filters[name] = callback
 
     def add_shutdown_signal(self, signal_callback):
         self.on_shutdown.append(signal_callback)

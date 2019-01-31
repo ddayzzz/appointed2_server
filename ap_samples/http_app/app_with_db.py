@@ -23,19 +23,16 @@ def make_app(dbusername, dbpasswd, dbname, dbhost, dbport, log_level='info'):
     from ap_http.app import BaseHttpApp
     import handlers
     from ap_database.dbmgr import MySQLManager
-    from ap_http.middlewares import make_auth_middleware, make_data_middleware, make_response_middleware
-    from ap_http.middlewares import ResponseMiddleware, UserAuthMiddleware
+    from ap_http.middlewares import make_middleware_wrap
+    from ap_http.middlewares import Jinja2TemplateResponseMiddleware
     from ap_http.signals import make_shutdown_sqlmanager_signal
     from model import User
 
     dbm = MySQLManager(username=dbusername, password=dbpasswd, dbname=dbname, host=dbhost, port=dbport)
     server = BaseHttpApp('SampleServer')
     server.add_route_group(handlers)
-    server.add_template('templates')
-    server.add_middleware([make_data_middleware(),
-                           make_auth_middleware(
-                               UserAuthMiddleware(cookie_name="ap", cookie_key="haha", type_of_user=User, dbmgr=dbm)),
-                           make_response_middleware(ResponseMiddleware())])
+
+    server.add_middleware([make_middleware_wrap(Jinja2TemplateResponseMiddleware(templates_dir='./templates'))])
     server.add_kwargs_to_route(dbm=dbm, sb='TOO YOUNG')
     server.add_shutdown_signal(make_shutdown_sqlmanager_signal(dbm))
     return server

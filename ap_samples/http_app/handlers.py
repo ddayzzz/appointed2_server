@@ -11,7 +11,8 @@ async def test(dbm):
 
 @get('/')
 def hello_word(sb):
-    return 'Hello word, {}!'.format(sb)
+    # return 'Hello word, {}!'.format(sb)
+    return {'__template__': 'hello.html', 'name': 'sss'}
 
 
 @get('/hello/{name}')

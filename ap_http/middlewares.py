@@ -348,7 +348,7 @@ class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
                     resp = Response(
                         body=self._DEFAULT_ROUTE_ERROR_STRING.format(method=request.method,
                                                                      path=request.path,
-                                                                     error_class=str(type(exc)),
+                                                                     error_class=exc.__class__.__name__,
                                                                      traceback=traceback.format_exc()),
                         status=500)
 

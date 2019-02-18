@@ -240,6 +240,7 @@ class ResponseMiddleware(Middleware):
 class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
 
     _DEFAULT_ERROR_STRING = '<h1>{reason}</h1><br><p>Method: {method}</p><br><p>Path: {path}</p>'
+    _DEFAULT_ROUTE_ERROR_STRING = '<h1>{error_class}</h1><br><pre>{traceback}</pre><p>Method: {method}</p><br><p>Path: {path}</p>'
 
     def __init__(self, templates_dir, filters=None, only_process_on_get=True, *args, **kwargs):
         """
@@ -267,6 +268,7 @@ class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
                 env.filters[name] = f
         self.template = env
         self.error_html = dict()
+        self.route_error_html = None
         self.only_process_on_get = only_process_on_get
 
     def add_filter(self, name, callback):
@@ -298,6 +300,8 @@ class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
         """
         if response.get('__template__'):
             return self._render_template(response['__template__'], status=status, **response)
+        else:
+            return super(Jinja2TemplateResponseMiddleware, self)._handle_dict(request=request, response=response, status=status)
 
     def _handle_server_exception(self, request, exc):
         """
@@ -313,31 +317,44 @@ class Jinja2TemplateResponseMiddleware(ResponseMiddleware):
                 if html:
                     return self._render_template(html, exc.status,
                                                  path=request.path,
-                                                 method=request.method,
-                                                 code=exc.status)
-        # 转换为普通的
-        resp = Response(
-            body=self._DEFAULT_ERROR_STRING.format(code=exc.status, method=request.method, path=request.path, reason=exc.reason),
-            status=exc.status)
-        resp.content_type = 'text/html;charset=utf-8'
-        return resp
+                                                 method=request.method)
+                else:
+                    # default string
+                    resp = Response(
+                        body=self._DEFAULT_ERROR_STRING.format(method=request.method, path=request.path, reason=exc.reason),
+                        status=exc.status)
+                    resp.content_type = 'text/html;charset=utf-8'
+                    return resp
+        # 返回基类的调用
+        return super(Jinja2TemplateResponseMiddleware, self)._handle_server_exception(request, exc)
 
     def _handle_route_exception(self, request, exc):
+        """
+        handle route call error
+        :param request:
+        :param exc: BaseException or its derived class' instance
+        :return:
+        """
+
         # 检查相关处理
         if self.only_process_on_get:
             if request.method == 'GET':
-                html = self.error_html.get(exc.status)
-                if html:
-                    return self._render_template(html, exc.status,
+                if self.route_error_html:
+                    return self._render_template(self.route_error_html, 500,  # server internal error
                                                  path=request.path,
-                                                 method=request.method,
-                                                 code=exc.status)
-        # 转换为普通的
-        resp = Response(
-            body=self._DEFAULT_ERROR_STRING.format(code=exc.status, method=request.method, path=request.path, reason=exc.reason),
-            status=exc.status)
-        resp.content_type = 'text/html;charset=utf-8'
-        return resp
+                                                 method=request.method)
+                else:
+                    # default error
+                    resp = Response(
+                        body=self._DEFAULT_ROUTE_ERROR_STRING.format(method=request.method,
+                                                                     path=request.path,
+                                                                     error_class=str(type(exc)),
+                                                                     traceback=traceback.format_exc()),
+                        status=500)
+
+                    resp.content_type = 'text/html;charset=utf-8'
+                    return resp
+        return super(Jinja2TemplateResponseMiddleware, self)._handle_route_exception(exc=exc, request=request)
 
 
 def make_middleware_wrap(middleware_obj):

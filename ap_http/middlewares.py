@@ -9,6 +9,8 @@ from aiohttp.web import middleware, Response, StreamResponse, HTTPFound, HTTPErr
 from ap_logger.logger import make_logger
 from ap_http import exceptions
 from abc import abstractmethod
+from functools import singledispatch
+from collections import  abc
 import json
 import traceback
 
@@ -49,6 +51,7 @@ class ResponseMiddleware(Middleware):
 
     def __init__(self, *args, **kwargs):
         super(ResponseMiddleware, self).__init__()
+
 
     def _handle_response(self, request, response):
         """
@@ -189,10 +192,10 @@ class ResponseMiddleware(Middleware):
         :param obj: object to dump
         :return: serialize-able obj
         """
-        if obj and hasattr(obj, __dict__) and callable(obj.__dict__):
+        if obj and hasattr(obj, '__dict__') and callable(obj.__dict__):
             return obj.__dict__()
         else:
-            return obj
+            return str(obj)
 
     @middleware
     async def __call__(self, request, handler):

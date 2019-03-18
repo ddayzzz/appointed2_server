@@ -109,6 +109,9 @@ class RouterCallBack(object):
                 kw = {arg: value for arg, value in request.match_info.items() if arg in required_args}
         # 获取match_info的参数值，例如@get('/blog/{id}')之类的参数值
         kw.update(request.match_info)
+        # 添加其他的 关键字
+        if 'request' in required_args:
+            kw['request'] = request
         # fill the kwargs
         for k, v in app.ap_kwargs.items():
             if k in required_args:
